@@ -1,16 +1,20 @@
 /**
  * Safely load JSON onto a Fabric canvas and wait for ALL images to
- * finish loading before calling renderAll(). This fixes the "black image"
- * bug when switching variants because loadFromJSON resolves before
- * HTMLImageElements have decoded their source.
+ * finish loading AND the canvas to actually re-render, before returning.
+ *
+ * The "black image" and "wrong variant export" bugs both come from
+ * loadFromJSON resolving before enlivenObjects/images/rendering finish.
  */
 export async function safeLoadFromJSON(canvas, jsonInput) {
   const json = typeof jsonInput === 'string' ? JSON.parse(jsonInput) : jsonInput
+  // 1. Load objects (Fabric resolves once objects are added to canvas)
   await new Promise((resolve) => {
     canvas.loadFromJSON(json, () => resolve())
   })
-  // Collect all image objects (frames + overlays)
-  const imageObjs = canvas.getObjects().filter((o) => o.type === 'image' || o.type === 'Image')
+  // 2. Wait for every image HTMLImageElement to be decoded
+  const imageObjs = canvas
+    .getObjects()
+    .filter((o) => o.type === 'image' || o.type === 'Image')
   await Promise.all(
     imageObjs.map((img) => {
       const el = img._element || img._originalElement
@@ -20,12 +24,21 @@ export async function safeLoadFromJSON(canvas, jsonInput) {
         const done = () => res()
         el.addEventListener('load', done, { once: true })
         el.addEventListener('error', done, { once: true })
-        // Safety timeout: never hang forever
         setTimeout(done, 5000)
       })
     })
   )
-  // Force full re-render once images are decoded
+  // 3. Refresh coords + render synchronously
+  canvas.getObjects().forEach((o) => o.setCoords?.())
+  canvas.renderAll()
+  // 4. Wait one animation frame so the pixel buffer is actually written
+  await new Promise((res) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => res())
+    } else {
+      setTimeout(res, 20)
+    }
+  })
   canvas.requestRenderAll()
   canvas.calcOffset?.()
 }

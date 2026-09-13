@@ -480,31 +480,43 @@ async function exportAll() {
     const originalIndex = activeVariantIndex.value
     variants.value[originalIndex].canvasJSON = snapshotCanvas()
     const zip = new JSZip()
-    const zoom = canvas.getZoom() || 1
-    const prevSelected = canvas.getActiveObject()
-    canvas.discardActiveObject()
-    canvas.renderAll()
+    // Render each variant on a FRESH offscreen canvas so nothing leaks
+    // between variants (this was causing duplicated exports).
     for (let i = 0; i < variants.value.length; i++) {
       const v = variants.value[i]
-      if (v.canvasJSON) {
-        await safeLoadFromJSON(canvas, v.canvasJSON)
-      } else if (v.layoutId && v.imageIndices) {
-        await renderCollage(canvas, v.layoutId, images.value, v.imageIndices, v.mainIndex)
-        v.canvasJSON = snapshotCanvas()
-      } else {
-        continue
-      }
-      const dataURL = canvas.toDataURL({
-        format: 'jpeg',
-        quality: 0.93,
-        multiplier: 1 / zoom,
+      const off = new fabric.StaticCanvas(null, {
+        width: 1080,
+        height: 1350,
+        backgroundColor: '#ffffff',
+        enableRetinaScaling: false,
+        renderOnAddRemove: false,
       })
-      const base64 = dataURL.split(',')[1]
-      zip.file(`${slug()}-v${i + 1}.jpg`, base64, { base64: true })
+      try {
+        if (v.canvasJSON) {
+          await safeLoadFromJSON(off, v.canvasJSON)
+        } else if (v.layoutId && v.imageIndices) {
+          await renderCollage(off, v.layoutId, images.value, v.imageIndices, v.mainIndex)
+        } else {
+          continue
+        }
+        // Ensure no zoom on offscreen canvas
+        off.setZoom(1)
+        off.renderAll()
+        // Wait a frame so the pixel buffer is populated
+        await new Promise((res) => {
+          if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => res())
+          else setTimeout(res, 20)
+        })
+        const dataURL = off.toDataURL({
+          format: 'jpeg',
+          quality: 0.93,
+        })
+        const base64 = dataURL.split(',')[1]
+        zip.file(`${slug()}-v${i + 1}.jpg`, base64, { base64: true })
+      } finally {
+        off.dispose()
+      }
     }
-    await safeLoadFromJSON(canvas, variants.value[originalIndex].canvasJSON)
-    if (prevSelected) canvas.setActiveObject(prevSelected)
-    canvas.requestRenderAll()
     const blob = await zip.generateAsync({ type: 'blob' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
