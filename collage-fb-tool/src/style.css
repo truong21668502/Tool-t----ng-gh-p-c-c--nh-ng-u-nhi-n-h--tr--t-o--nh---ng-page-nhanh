@@ -1,0 +1,10 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #app { height: 100%; }
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: #0f0f1a;
+  color: #eee;
+  overflow: hidden;
+}
+canvas { display: block; }
+button { font-family: inherit; }
