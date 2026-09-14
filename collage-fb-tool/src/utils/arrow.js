@@ -1,4 +1,5 @@
 import * as fabric from 'fabric'
+import { applyUniformScaling } from './uniformScaling'
 /**
  * Create an arrow as ONE object (Group: line + triangle head).
  * Default: red, horizontal, length 240px.
@@ -43,6 +44,7 @@ export function createArrow(opts = {}) {
   group._arrowLength = length
   group._arrowColor = color
   group._arrowStrokeWidth = strokeWidth
+  applyUniformScaling(group)
   return group
 }
 /**

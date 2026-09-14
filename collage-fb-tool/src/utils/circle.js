@@ -1,4 +1,5 @@
 import * as fabric from 'fabric'
+import { applyUniformScaling } from './uniformScaling'
 export function createCircle(opts = {}) {
   const {
     left = 440,
@@ -18,5 +19,6 @@ export function createCircle(opts = {}) {
     originY: 'top',
   })
   c._isCircle = true
+  applyUniformScaling(c)
   return c
 }

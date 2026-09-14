@@ -1,7 +1,10 @@
 import * as fabric from 'fabric'
 /**
  * Create a FabricImage that fills a target rect using object-fit: cover.
- * Center crop by default. Aspect ratio always preserved.
+ * Center crop by default. Aspect ratio preserved.
+ *
+ * KHONG ap dung uniform scaling cho frame - de user keo canh tu do.
+ * App.vue se snap ve cover-fit sau khi keo xong (object:modified).
  */
 export async function createCoverImage(url, targetX, targetY, targetW, targetH) {
   const img = await fabric.FabricImage.fromURL(url, { crossOrigin: 'anonymous' })
@@ -29,6 +32,8 @@ export async function createCoverImage(url, targetX, targetY, targetW, targetH) 
     hasControls: true,
     hasBorders: true,
     lockRotation: false,
+    // Cho phep keo canh tu do
+    lockUniScaling: false,
   })
   img._isFrame = true
   img._frameW = targetW

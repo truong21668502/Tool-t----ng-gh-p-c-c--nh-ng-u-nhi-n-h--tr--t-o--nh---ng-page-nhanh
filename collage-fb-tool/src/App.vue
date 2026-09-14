@@ -1,6 +1,10 @@
 <template>
   <div class="app-shell">
-    <header class="toolbar">
+    <nav class="top-tabs">
+      <button :class="{ active: activeView === 'editor' }" @click="activeView = 'editor'">Editor</button>
+      <button :class="{ active: activeView === 'management' }" @click="activeView = 'management'">Quan ly bai dang</button>
+    </nav>
+    <header v-if="activeView === 'editor'" class="toolbar">
       <h1>Collage FB Tool</h1>
       <div class="toolbar-actions">
         <input v-model="articleName" class="article-input" placeholder="article-01" />
@@ -13,9 +17,12 @@
         <button class="btn-accent" @click="exportAll" :disabled="!canvasReady || variants.length === 0 || exporting">
           {{ exporting ? 'Exporting...' : 'Download All (ZIP)' }}
         </button>
+        <button class="btn-save" @click="showSaveModal = true" :disabled="!canvasReady || variants.length === 0">
+          Luu
+        </button>
       </div>
     </header>
-    <div class="main-area">
+    <div v-show="activeView === 'editor'" class="main-area">
       <aside class="sidebar-left">
         <div class="sidebar-header">
           <span>Images ({{ images.length }})</span>
@@ -83,7 +90,7 @@
         />
       </aside>
     </div>
-    <footer class="variant-bar">
+    <footer v-show="activeView === 'editor'" class="variant-bar">
       <VariantSelector
         :variants="variants"
         :active-index="activeVariantIndex"
@@ -91,10 +98,18 @@
       />
     </footer>
     <input ref="overlayInputEl" type="file" accept="image/*" hidden @change="onOverlayFileSelected" />
+    <ManagementPage v-if="activeView === 'management'" :posts="posts" />
+    <SaveModal
+      v-if="showSaveModal"
+      :saving="savingContent"
+      :progress="saveProgress"
+      @close="showSaveModal = false"
+      @save="handleSaveContent"
+    />
   </div>
 </template>
 <script setup>
-import { ref, shallowRef, computed } from 'vue'
+import { ref, shallowRef, computed, onMounted, watch } from 'vue'
 import * as fabric from 'fabric'
 import JSZip from 'jszip'
 import ImageUploader from './components/images/ImageUploader.vue'
@@ -115,12 +130,20 @@ import { textPresets } from './utils/textPresets'
 import { createCircle } from './utils/circle'
 import { createArrow } from './utils/arrow'
 import { layouts } from './utils/layouts'
+import { applyUniformScaling, needsUniformScaling, snapFrameCoverFit } from './utils/uniformScaling'
+import SaveModal from './components/editor/SaveModal.vue'
+import ManagementPage from './components/management/ManagementPage.vue'
+import { usePosts } from './composables/usePosts'
 const canvasComp = ref(null)
 const canvasAreaEl = ref(null)
 const overlayInputEl = ref(null)
 const canvasReady = ref(false)
 const fabricCanvasRef = shallowRef(null)
 const exporting = ref(false)
+const activeView = ref('editor')
+const showSaveModal = ref(false)
+const savingContent = ref(false)
+const saveProgress = ref('')
 const articleName = ref('article-01')
 const selectedObject = shallowRef(null)
 const objectVersion = ref(0)
@@ -135,6 +158,7 @@ const {
   updatePreferences, resolveOne, switchVariant: switchVariantState,
 } = useVariants()
 const activeVariant = computed(() => variants.value[activeVariantIndex.value] || null)
+const posts = usePosts()
 const history = useCanvasHistory(() => fabricCanvasRef.value)
 const { canUndo, canRedo } = history
 const crop = useCropMode(() => fabricCanvasRef.value, () => {
@@ -146,7 +170,56 @@ const EXTRA_PROPS = [
   '_regionRole', '_regionIndex', '_isArrow', '_isCircle',
   '_arrowLength', '_arrowColor', '_arrowStrokeWidth', '_isOverlay',
 ]
-function onImagesAdded(files) { addFiles(files) }
+onMounted(() => {
+  posts.init().catch((e) => console.warn('posts init failed', e))
+  // Restore view tu URL neu co
+  if (window.location.pathname.startsWith('/quan-ly-bai-dang')) {
+    activeView.value = 'management'
+  }
+  window.addEventListener('popstate', () => {
+    if (window.location.pathname.startsWith('/quan-ly-bai-dang')) {
+      activeView.value = 'management'
+    } else {
+      activeView.value = 'editor'
+    }
+  })
+})
+// Khi doi tab -> sync URL + refit canvas khi quay lai editor
+watch(activeView, async (v) => {
+  if (v === 'editor') {
+    if (window.location.pathname !== '/') {
+      window.history.pushState({}, '', '/')
+    }
+    // Doi canvas show lai -> refit
+    await nextTick()
+    setTimeout(() => {
+      try { canvasComp.value?.refit?.() } catch (e) { /* ignore */ }
+    }, 100)
+  } else {
+    if (!window.location.pathname.startsWith('/quan-ly-bai-dang')) {
+      window.history.pushState({}, '', '/quan-ly-bai-dang')
+    }
+  }
+})
+let autoGenTimer = null
+function scheduleAutoGenerate() {
+  if (autoGenTimer) clearTimeout(autoGenTimer)
+  autoGenTimer = setTimeout(async () => {
+    autoGenTimer = null
+    if (!canvasReady.value) return
+    if (images.value.length < 1) return
+    if (crop.isActive()) crop.exit()
+    try {
+      await generateVariants()
+    } catch (e) {
+      console.warn('auto generate failed', e)
+    }
+  }, 400)
+}
+async function onImagesAdded(files) {
+  await addFiles(files)
+  scheduleAutoGenerate()
+}
 function onCanvasReady(canvas) {
   fabricCanvasRef.value = canvas
   canvasReady.value = true
@@ -159,12 +232,23 @@ function onCanvasReady(canvas) {
   canvas.on('selection:cleared', () => {
     selectedObject.value = null
   })
-  canvas.on('object:modified', () => {
+  canvas.on('object:modified', (e) => {
+    const obj = e.target
+    if (obj && obj._isFrame) {
+      snapFrameCoverFit(obj)
+      canvas.requestRenderAll()
+    }
     objectVersion.value++
     layersVersion.value++
     if (!history.isLocked()) history.push()
   })
-  canvas.on('object:added', () => { layersVersion.value++ })
+  canvas.on('object:added', (e) => {
+    layersVersion.value++
+    const obj = e.target
+    if (obj && needsUniformScaling(obj)) {
+      applyUniformScaling(obj)
+    }
+  })
   canvas.on('object:removed', () => {
     layersVersion.value++
     if (selectedObject.value && !canvas.getObjects().includes(selectedObject.value)) {
@@ -178,6 +262,42 @@ function onCanvasReady(canvas) {
     } else if (crop.isActive()) {
       crop.exit()
     }
+  })
+  // Frame image: khi user keo resize khung, giu anh KHONG bi meo.
+  // Luon dong bo scaleX = scaleY, dieu chinh cropX/cropY/width/height
+  // de anh luon cover khung moi (object-fit: cover).
+  canvas.on('object:scaling', (e) => {
+    const obj = e.target
+    if (!obj || !obj._isFrame) return
+    if (history.isLocked()) return
+    const natW = obj._naturalW
+    const natH = obj._naturalH
+    if (!natW || !natH) return
+    // Kich thuoc khung moi ma user dang keo toi (theo canvas coords)
+    const desiredW = obj.width * obj.scaleX
+    const desiredH = obj.height * obj.scaleY
+    if (desiredW <= 1 || desiredH <= 1) return
+    // Uniform scale can thiet de cover khung moi
+    const newScale = Math.max(desiredW / natW, desiredH / natH)
+    const newCropW = Math.min(natW, desiredW / newScale)
+    const newCropH = Math.min(natH, desiredH / newScale)
+    // Giu tam crop hien tai (zoom/cover around center)
+    const oldCx = (obj.cropX || 0) + obj.width / 2
+    const oldCy = (obj.cropY || 0) + obj.height / 2
+    let newCropX = oldCx - newCropW / 2
+    let newCropY = oldCy - newCropH / 2
+    newCropX = Math.max(0, Math.min(natW - newCropW, newCropX))
+    newCropY = Math.max(0, Math.min(natH - newCropH, newCropY))
+    obj.set({
+      width: newCropW,
+      height: newCropH,
+      scaleX: newScale,
+      scaleY: newScale,
+      cropX: newCropX,
+      cropY: newCropY,
+    })
+    obj.setCoords()
+    canvas.requestRenderAll()
   })
 }
 function snapshotCanvas() {
@@ -358,6 +478,7 @@ async function onOverlayFileSelected(e) {
     left: 540, top: 675, originX: 'center', originY: 'center',
   })
   group._isOverlay = true
+  applyUniformScaling(group)
   canvas.add(group)
   canvas.setActiveObject(group)
   canvas.requestRenderAll()
@@ -440,7 +561,6 @@ function onLayerSelected(obj) {
 /* ===== CLEAR ALL ===== */
 function clearAllImages() {
   if (images.value.length === 0) return
-  if (!confirm('Xoa toan bo anh de bat dau dot moi?')) return
   if (crop.isActive()) crop.exit()
   clearAllImagesData()
   variants.value = []
@@ -471,7 +591,113 @@ function exportCurrent() {
   })
   downloadDataURL(dataURL, `${slug()}-v${activeVariantIndex.value + 1}.jpg`)
 }
-async function exportAll() {
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout: ${label} (${ms}ms)`)), ms)
+    ),
+  ])
+}
+function dataURLToBlob(dataURL) {
+  const [meta, base64] = dataURL.split(',')
+  const mime = (meta.match(/:(.*?);/) || [, 'image/png'])[1]
+  const binary = atob(base64)
+  const array = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i)
+  return new Blob([array], { type: mime })
+}
+async function renderVariantToBlob(variant) {
+  const off = new fabric.StaticCanvas(null, {
+    width: 1080,
+    height: 1350,
+    backgroundColor: '#ffffff',
+    enableRetinaScaling: false,
+    renderOnAddRemove: false,
+  })
+  try {
+    if (variant.canvasJSON) {
+      await safeLoadFromJSON(off, variant.canvasJSON)
+    } else if (variant.layoutId && variant.imageIndices) {
+      await renderCollage(off, variant.layoutId, images.value, variant.imageIndices, variant.mainIndex)
+    } else {
+      throw new Error('Variant chua duoc render. Hay Generate lai.')
+    }
+    off.setZoom(1)
+    off.renderAll()
+    // Cho 1 nhip de pixel buffer on dinh (dung setTimeout thay rAF vi rAF co the bi throttle)
+    await new Promise((res) => setTimeout(res, 80))
+    // Dung toDataURL thay vi toBlob (Fabric v7 toBlob khong dang tin cay)
+    const dataURL = off.toDataURL({ format: 'png', quality: 1 })
+    return dataURLToBlob(dataURL)
+  } finally {
+    try { off.dispose() } catch (e) {}
+  }
+}
+async function handleSaveContent({ folderDate, captions }) {
+  if (!variants.value.length) {
+    alert('Chua co variant nao. Hay Generate truoc.')
+    return
+  }
+  savingContent.value = true
+  saveProgress.value = 'Bat dau...'
+  try {
+    // ---- STEP 1: chon thu muc neu chua co ----
+    if (!posts.dirHandle.value) {
+      saveProgress.value = 'Dang cho ban chon thu muc...'
+      try {
+        const handle = await posts.pickBaseDir()
+        await posts.saveDirHandle(handle)
+      } catch (e) {
+        alert('Ban can chon thu muc luu. Chi tiet: ' + e.message)
+        return
+      }
+    }
+    // ---- STEP 2: snapshot variant hien tai ----
+    saveProgress.value = 'Chuan bi du lieu...'
+    const cur = variants.value[activeVariantIndex.value]
+    if (cur) cur.canvasJSON = snapshotCanvas()
+    // ---- STEP 3: render 4 blob ----
+    const blobs = []
+    const total = Math.min(4, variants.value.length)
+    for (let i = 0; i < total; i++) {
+      saveProgress.value = `Dang render anh ${i + 1}/${total}...`
+      const blob = await withTimeout(
+        renderVariantToBlob(variants.value[i]),
+        30000,
+        `render variant ${i + 1}`
+      )
+      blobs.push(blob)
+    }
+    while (blobs.length < 4) blobs.push(blobs[blobs.length - 1])
+    // ---- STEP 4: luu vao filesystem + IndexedDB ----
+    saveProgress.value = 'Dang luu vao thu muc...'
+    const rec = await withTimeout(
+      posts.saveContent({
+        folderDate,
+        captions,
+        variantBlobs: blobs.slice(0, 4),
+      }),
+      60000,
+      'saveContent'
+    )
+    // ---- STEP 5: phan phoi bai ----
+    saveProgress.value = 'Dang phan phoi bai...'
+    try {
+      await withTimeout(posts.distribute(folderDate), 15000, 'distribute')
+    } catch (e) {
+      console.warn('Distribute failed (khong nghiem trong):', e)
+    }
+    saveProgress.value = 'Hoan tat!'
+    showSaveModal.value = false
+  } catch (e) {
+    console.error('Save error:', e)
+    alert('Luu that bai: ' + e.message)
+  } finally {
+    savingContent.value = false
+    saveProgress.value = ''
+  }
+}async function exportAll() {
   if (crop.isActive()) crop.exit()
   const canvas = fabricCanvasRef.value
   if (!canvas || variants.value.length === 0) return
@@ -561,7 +787,27 @@ if (typeof window !== 'undefined') {
 }
 </script>
 <style scoped>
+.top-tabs {
+  display: flex;
+  background: #0a0a12;
+  border-bottom: 1px solid #2a2a3e;
+  padding: 0 16px;
+  flex-shrink: 0;
+}
+.top-tabs button {
+  padding: 10px 18px;
+  background: transparent;
+  color: #889;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+.top-tabs button.active { color: #eee; border-bottom-color: #4a9eff; }
+.top-tabs button:hover { color: #ccd; }
 .app-shell { display: flex; flex-direction: column; height: 100vh; }
+.btn-save { background: #7a3a1a !important; }
+.btn-save:hover:not(:disabled) { background: #9a4a2a !important; }
 .toolbar {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 16px; background: #16213e; border-bottom: 1px solid #2a2a3e;
